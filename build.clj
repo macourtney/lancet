@@ -40,34 +40,46 @@
   (init)
   (build-clojure) 
   (build-contrib)
-  (copy {:file (str clojure-home "/clojure.jar") 
-         :todir lib-dir})
-  (copy {:file (str contrib-home "/clojure-contrib.jar") 
-         :todir lib-dir}))
+  (copy { :file (str clojure-home "/clojure.jar") 
+          :todir lib-dir})
+  (copy { :file (str contrib-home "/clojure-contrib.jar") 
+          :todir lib-dir}))
 
 (deftarget compile-lancet "compile lancet"
   (init)
-  (system (str "java -Dclojure.compile.path="
-	       build-dir
-	       " -cp " classpath
-               " clojure.lang.Compile lancet")))
+  (java { :classname "clojure.lang.Compile"
+          :dir build-dir
+          :fork "true" }
+    [:jvmarg { :value (str "-Dclojure.compile.path=" build-dir) } ]
+    [:arg { :value "lancet" } ]))
 
 (deftarget test-lancet "test lancet"
   (compile-lancet)
-  (system (str "java -cp " classpath " clojure.lang.Script lancet/test.clj")))
+  (java { :classname "clojure.lang.Script"
+          :fork "true"
+          :classpath classpath }
+    [:arg { :value "lancet/test.clj" } ]))
 
 (deftarget create-jar "jar up lancet"
   (init)
   (licenses)
-  (unjar {:src (str lib-dir "/clojure.jar")
-	  :dest build-dir})
-  (unjar {:src (str lib-dir "/clojure-contrib.jar")
-	  :dest build-dir})
-  (unjar {:src (str lib-dir "/ant.jar")
-	  :dest build-dir})
-  (unjar {:src (str lib-dir "/ant-launcher.jar")
-	  :dest build-dir})
+  (unjar { :src (str lib-dir "/clojure.jar")
+           :dest build-dir})
+  (unjar { :src (str lib-dir "/clojure-contrib.jar")
+           :dest build-dir})
+  (unjar { :src (str lib-dir "/ant.jar")
+           :dest build-dir})
+  (unjar { :src (str lib-dir "/ant-launcher.jar")
+           :dest build-dir})
   (compile-lancet)
-  (jar {:jarfile (str lib-dir "/lancet.jar")
-	:basedir "build"
-	:manifest "MANIFEST.MF"}))
+  (jar { :jarfile (str lib-dir "/lancet.jar")
+         :basedir "build"
+         :manifest "MANIFEST.MF"}))
+         
+(deftarget default "Do everything."
+  (test-lancet)
+  (create-jar))
+
+(if (not-empty *command-line-args*)
+  (apply -main *command-line-args*)
+  (default))

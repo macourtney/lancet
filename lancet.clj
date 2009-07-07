@@ -2,28 +2,13 @@
   (:gen-class)
   (:use [clojure.contrib.except :only (throw-if)] 
         clojure.contrib.shell-out
-	[clojure.contrib.str-utils :only (re-split)])
-  (:import (java.beans Introspector) (java.util.concurrent CountDownLatch)))
-
-(defmulti coerce (fn [dest-class src-inst] [dest-class (class src-inst)]))
-
-(defmethod coerce [java.io.File String] [_ str] 
-  (java.io.File. str))
-(defmethod coerce [Boolean/TYPE String] [_ str]
-  (contains? #{"on" "yes" "true"} (.toLowerCase str)))
-(defmethod coerce :default [dest-cls obj] (cast dest-cls obj))
-
-(defn env [val]
-  (System/getenv (name val)))
-
-(defn- build-sh-args [args]
-  (concat (re-split #"\s+" (first args)) (rest args)))
-
-(defn system [& args]
-  (println (apply sh (build-sh-args args))))
+	      [clojure.contrib.str-utils :only (re-split)])
+  (:import (java.beans Introspector) 
+           (java.util.concurrent CountDownLatch)
+           (org.apache.tools.ant.types Path)))
 
 (def
- #^{:doc "Dummy ant project to keep Ant tasks happy"} 	
+ #^{:doc "Dummy ant project to keep Ant tasks happy"}   
  ant-project                                            
  (let [proj (org.apache.tools.ant.Project.)             
        logger (org.apache.tools.ant.NoBannerLogger.)]
@@ -34,6 +19,26 @@
    (doto proj                                           
      (.init)                                                                             
      (.addBuildListener logger))))
+
+(defmulti coerce (fn [dest-class src-inst] [dest-class (class src-inst)]))
+
+(defmethod coerce [java.io.File String] [_ str] 
+  (java.io.File. str))
+(defmethod coerce [Boolean/TYPE String] [_ str]
+  (contains? #{"on" "yes" "true"} (.toLowerCase str)))
+(defmethod coerce [Path String] [_ str]
+  (new Path ant-project str))
+(defmethod coerce :default [dest-cls obj]
+  (cast dest-cls obj))
+
+(defn env [val]
+  (System/getenv (name val)))
+
+(defn- build-sh-args [args]
+  (concat (re-split #"\s+" (first args)) (rest args)))
+
+(defn system [& args]
+  (println (apply sh (build-sh-args args))))
 
 (defn property-descriptor [inst prop-name]
   (first
@@ -52,7 +57,37 @@
       (.invoke write-method inst (into-array [(coerce dest-class value)])))))
 
 (defn set-properties! [inst prop-map]
-  (doseq [[k v] prop-map] (set-property! inst (name k) v))) 
+  (doseq [[k v] prop-map] (set-property! inst (name k) v)))
+  
+(defn update-property [property args add-subproperty]
+  (let [property-map (if (map? (first args)) (first args) nil)
+        sub-properties (if property-map (rest args) args)]
+    (if property-map (set-properties! property property-map))
+    (when (property-descriptor property "project")
+      (set-property! property "project" ant-project))
+    (doseq [sub-property sub-properties]
+      (add-subproperty property sub-property))))
+  
+(defn add-subproperty [task property]
+  (if (vector? property)
+    (let [property-name (. (str (first property)) substring 1)
+          creator-method-name (str "create" (. (. property-name substring 0 1) toUpperCase) (. property-name substring 1))]
+      (try
+        (let [task-class (. task getClass)
+              creator-method (. task-class getMethod creator-method-name (into-array Class []))
+              new-property (. creator-method invoke task (into-array Class []))
+              new-property-args (rest property)]
+          (update-property new-property new-property-args add-subproperty))
+        (catch java.lang.IllegalArgumentException ex
+          (throw (new RuntimeException (str "Could not find creator (" creator-method-name ") for " property-name " on task " (.. task getClass getName)) ex)))))
+    (try
+      (let [add-method (str "add" (.. property getClass getName))]
+        (. task (symbol add-method) property ))
+      (catch java.lang.IllegalArgumentException ex
+        (try
+          (.add task property)
+          (catch java.lang.IllegalArgumentException ex
+            (throw (new RuntimeException (str "Could not find adder for" (. property getClass) "on task" (. task getClass)) ex))))))))
 
 (defn instantiate-task [project name props & filesets]
   (let [task (.createTask project name)]
@@ -62,7 +97,7 @@
       (.setProject project)
       (set-properties! props))
     (doseq [fs filesets]
-      (.add task fs))	
+      (add-subproperty task fs))	
     task))
 
 (defn runonce
@@ -105,21 +140,16 @@
        (.execute task#)
        task#)))
 
-(defmacro define-ant-type [clj-name ant-name]
-  `(defn ~clj-name [props#]
-     (let [bean# (new ~ant-name)]
-       (set-properties! bean# props#)
-       (when (property-descriptor bean# "project")
-	 (set-property! bean# "project" ant-project))
-       bean#)))
+(defmacro define-ant-type [clj-name ant-name & constructor-args]
+  `(defn ~clj-name [& args#]
+     (let [bean# (new ~ant-name ~@constructor-args)]
+       (update-property bean# args# add-subproperty)
+	     bean#)))
 
 (defn task-names [] (map symbol (seq (.. ant-project getTaskDefinitions keySet))))
 
 (defn safe-ant-name [n]
   (if (ns-resolve 'clojure.core n) (symbol (str "ant-" n)) n))
-
-(defmacro define-all-ant-tasks []
-  `(do ~@(map (fn [n] `(define-ant-task ~n ~n)) (task-names))))
 
 (defmacro define-all-ant-tasks []
   `(do ~@(map (fn [n] `(define-ant-task ~(safe-ant-name n) ~n)) (task-names))))
